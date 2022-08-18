@@ -55,8 +55,6 @@ where
         self.clone()
     }
 
-    // Here we wire together the layers by using the output advice in each layer as input advice in the next (not with copying / equality).
-    // This can be automated but we will sometimes want skip connections, etc. so we need the flexibility.
     fn configure(cs: &mut ConstraintSystem<F>) -> Self::Config {
         let num_advices = LEN + 3;
         let advices = (0..num_advices)
