@@ -129,7 +129,8 @@ where
 }
 
 pub fn mlprun() {
-    use halo2_proofs::{dev::MockProver, pasta::Fp as F};
+    use halo2_proofs::dev::MockProver;
+    use halo2curves::pasta::Fp as F;
     use halo2deeplearning::fieldutils::i32tofelt;
 
     let k = 15; //2^k rows
