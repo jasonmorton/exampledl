@@ -6,10 +6,28 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+itertools = "0.10.3"
+rand = "0.8"
+# halo2
 #halo2_proofs = { git = "https://github.com/zcash/halo2.git", branch = "reduce-ast-evaluator-memory-usage"}
-halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2.git"}
+#halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2.git"}
+halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2", tag = "v2022_08_19"}
 halo2curves = { git = 'https://github.com/privacy-scaling-explorations/halo2curves', tag = "0.2.1" }
-halo2deeplearning = {git = "https://github.com/jasonmorton/halo2deeplearning.git"}
+#halo2deeplearning = {git = "https://github.com/jasonmorton/halo2deeplearning.git"}
+halo2deeplearning = {path = "../../deeplearning"}
+#evm 
+ethereum_types = { package = "ethereum-types", version = "0.13.1", default-features = false, features = ["std"], optional = true }
+
+foundry_evm = { git = "https://github.com/foundry-rs/foundry", package = "foundry-evm", rev = "93ee742d" }
+
+plonk-verifier = {path = "../plonk-verifier-07c50b6d399d389fe787cdaa1fd7200e463d7ab6"}
 
 
+[patch."https://github.com/privacy-scaling-explorations/halo2"]
+halo2_proofs = { git = "https://github.com/han0110/halo2", branch = "feature/configurable-instance-query", package = "halo2_proofs" }
 
+[patch."https://github.com/privacy-scaling-explorations/halo2wrong"]
+halo2_wrong = { git = "https://github.com/han0110/halo2wrong", branch = "feature/range-chip-with-tagged-table", package = "halo2wrong" }
+halo2_wrong_ecc = { git = "https://github.com/han0110/halo2wrong", branch = "feature/range-chip-with-tagged-table", package = "ecc" }
+halo2_wrong_maingate = { git = "https://github.com/han0110/halo2wrong", branch = "feature/range-chip-with-tagged-table", package = "maingate" }
+halo2_wrong_transcript = { git = "https://github.com/han0110/halo2wrong", branch = "feature/range-chip-with-tagged-table", package = "transcript" }
