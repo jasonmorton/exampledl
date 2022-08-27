@@ -12,11 +12,11 @@ rand = "0.8"
 #halo2_proofs = { git = "https://github.com/zcash/halo2.git", branch = "reduce-ast-evaluator-memory-usage"}
 #halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2.git"}
 halo2_proofs = { git = "https://github.com/privacy-scaling-explorations/halo2", tag = "v2022_08_19"}
-halo2curves = { git = 'https://github.com/privacy-scaling-explorations/halo2curves', tag = "0.2.1" }
+halo2_curves = { git = "https://github.com/privacy-scaling-explorations/halo2curves", tag = "0.2.1", package = "halo2curves" }
 #halo2deeplearning = {git = "https://github.com/jasonmorton/halo2deeplearning.git"}
 halo2deeplearning = {path = "../../deeplearning"}
 #evm 
-ethereum_types = { package = "ethereum-types", version = "0.13.1", default-features = false, features = ["std"], optional = true }
+ethereum_types = { package = "ethereum-types", version = "0.13.1", default-features = false, features = ["std"]}
 
 foundry_evm = { git = "https://github.com/foundry-rs/foundry", package = "foundry-evm", rev = "93ee742d" }
 

@@ -1,8 +1,41 @@
+use ethereum_types::Address;
+use foundry_evm::executor::{fork::MultiFork, Backend, ExecutorBuilder};
+use halo2_curves::bn256::{Bn256, Fq, Fr, G1Affine};
+
 use halo2_proofs::{
     arithmetic::FieldExt,
-    circuit::{Layouter, SimpleFloorPlanner},
-    plonk::{Circuit, Column, ConstraintSystem, Error, Instance},
+    circuit::{floor_planner::V1, Layouter, Value},
+    dev::MockProver,
+    plonk::{
+        create_proof, keygen_pk, keygen_vk, verify_proof, Advice, Any, Circuit, Column,
+        ConstraintSystem, Error, Fixed, Instance, ProvingKey, VerifyingKey,
+    },
+    poly::{
+        commitment::{Params, ParamsProver},
+        kzg::{
+            commitment::{KZGCommitmentScheme, ParamsKZG},
+            multiopen::{ProverGWC, VerifierGWC},
+            strategy::AccumulatorStrategy,
+        },
+        Rotation, VerificationStrategy,
+    },
+    transcript::{TranscriptReadBuffer, TranscriptWriterBuffer},
 };
+use itertools::Itertools;
+use plonk_verifier::{
+    loader::evm::{encode_calldata, EvmLoader, EvmTranscript},
+    protocol::halo2::{compile, Config},
+    scheme::kzg::{AccumulationScheme, PlonkAccumulationScheme, SameCurveAccumulation},
+    util::TranscriptRead,
+};
+use rand::{rngs::OsRng, RngCore};
+use std::{iter, rc::Rc};
+
+// use halo2_proofs::{
+// //    arithmetic::FieldExt,
+//   //  circuit::{Layouter, SimpleFloorPlanner},
+//   //  plonk::{Circuit, Column, ConstraintSystem, Error, Instance},
+// };
 
 use halo2deeplearning::{
     affine1d::{Affine1dConfig, RawParameters},
@@ -43,7 +76,7 @@ where
     [(); LEN + 3]:,
 {
     type Config = MLPConfig<F, LEN, INBITS, OUTBITS>;
-    type FloorPlanner = SimpleFloorPlanner;
+    type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
         self.clone()
@@ -51,6 +84,7 @@ where
 
     fn configure(cs: &mut ConstraintSystem<F>) -> Self::Config {
         let num_advices = LEN + 3;
+        println!("num_advices: {}", num_advices);
         let advices = (0..num_advices)
             .map(|_| {
                 let col = cs.advice_column();
@@ -128,13 +162,137 @@ where
     }
 }
 
+// Proof construction helpers
+fn sample_srs() -> ParamsKZG<Bn256> {
+    ParamsKZG::<Bn256>::setup(15, OsRng)
+}
+
+fn sample_pk<C: Circuit<Fr>>(params: &ParamsKZG<Bn256>, circuit: &C) -> ProvingKey<G1Affine> {
+    let vk = keygen_vk(params, circuit).unwrap();
+    keygen_pk(params, vk, circuit).unwrap()
+}
+
+fn sample_proof<C: Circuit<Fr>>(
+    params: &ParamsKZG<Bn256>,
+    pk: &ProvingKey<G1Affine>,
+    circuit: C,
+    instances: Vec<Vec<Fr>>,
+) -> Vec<u8> {
+    MockProver::run(params.k(), &circuit, instances.clone())
+        .unwrap()
+        .assert_satisfied();
+
+    let instances = instances
+        .iter()
+        .map(|instances| instances.as_slice())
+        .collect_vec();
+    let proof = {
+        let mut transcript = TranscriptWriterBuffer::<_, G1Affine, _>::init(Vec::new());
+        create_proof::<KZGCommitmentScheme<Bn256>, ProverGWC<_>, _, _, EvmTranscript<_, _, _, _>, _>(
+            params,
+            pk,
+            &[circuit],
+            &[instances.as_slice()],
+            OsRng,
+            &mut transcript,
+        )
+        .unwrap();
+        transcript.finalize()
+    };
+
+    let accept = {
+        let mut transcript = TranscriptReadBuffer::<_, G1Affine, _>::init(proof.as_slice());
+        VerificationStrategy::<_, VerifierGWC<_>>::finalize(
+            verify_proof::<_, VerifierGWC<_>, _, EvmTranscript<_, _, _, _>, _>(
+                params.verifier_params(),
+                pk.get_vk(),
+                AccumulatorStrategy::new(params.verifier_params()),
+                &[instances.as_slice()],
+                &mut transcript,
+            )
+            .unwrap(),
+        )
+    };
+    assert!(accept);
+
+    proof
+}
+
+fn evm_verifier_codegen(
+    params: &ParamsKZG<Bn256>,
+    vk: &VerifyingKey<G1Affine>,
+    instances: Vec<Vec<Fr>>,
+) -> Vec<u8> {
+    const LIMBS: usize = 4;
+    const BITS: usize = 68;
+
+    let protocol = compile(
+        vk,
+        Config {
+            zk: true,
+            query_instance: false,
+            num_instance: instances
+                .iter()
+                .map(|instances| instances.len())
+                .collect_vec(),
+            num_proof: 1,
+            accumulator_indices: None,
+        },
+    );
+
+    let loader = EvmLoader::new::<Fq, Fr>();
+    let mut transcript = EvmTranscript::<_, Rc<EvmLoader>, _, _>::new(loader.clone());
+    let instances = instances
+        .iter()
+        .map(|instance| {
+            iter::repeat_with(|| transcript.read_scalar().unwrap())
+                .take(instance.len())
+                .collect_vec()
+        })
+        .collect_vec();
+
+    let mut strategy = SameCurveAccumulation::<_, _, LIMBS, BITS>::default();
+    PlonkAccumulationScheme::accumulate(
+        &protocol,
+        &loader,
+        instances,
+        &mut transcript,
+        &mut strategy,
+    )
+    .unwrap();
+    strategy.finalize(params.get_g()[0], params.g2(), params.s_g2());
+    loader.deployment_code()
+}
+
+fn evm_verify(deployment_code: Vec<u8>, instances: Vec<Vec<Fr>>, proof: Vec<u8>) {
+    let calldata = encode_calldata(instances, proof);
+    let success = {
+        let mut evm = ExecutorBuilder::default()
+            .with_gas_limit(u64::MAX.into())
+            .build(Backend::new(MultiFork::new().0, None));
+
+        let caller = Address::from_low_u64_be(0xfe);
+        let verifier = evm
+            .deploy(caller, deployment_code.into(), 0.into(), None)
+            .unwrap()
+            .address;
+        let result = evm
+            .call_raw(caller, verifier, calldata.into(), 0.into())
+            .unwrap();
+
+        !result.reverted
+    };
+    assert!(success);
+}
+
 pub fn mlprun() {
+    use halo2_curves::bn256::Fr as F;
+    //    use halo2_curves::pasta::Fp as F;
     use halo2_proofs::dev::MockProver;
-    use halo2curves::pasta::Fp as F;
     use halo2deeplearning::fieldutils::i32tofelt;
 
-    let k = 15; //2^k rows
-                // parameters
+    //    let k = 15; //2^k rows  15
+    // parameters
     let l0weights: Vec<Vec<i32>> = vec![
         vec![10, 0, 0, -1],
         vec![0, 10, 1, 0],
@@ -161,6 +319,7 @@ pub fn mlprun() {
     let input: Vec<i32> = vec![-30, -21, 11, 40];
 
     let circuit = MLPCircuit::<F, 4, 14, 14> {
+        //14,14
         input,
         l0_params,
         l2_params,
@@ -176,14 +335,29 @@ pub fn mlprun() {
         ]
     };
 
+    // Mock Proof
+    // let prover = MockProver::run(
+    //     k,
+    //     &circuit,
+    //     vec![public_input.iter().map(|x| i32tofelt::<F>(*x)).collect()],
+    //     //            vec![vec![(4).into(), (1).into(), (35).into(), (22).into()]],
+    // )
+    // .unwrap();
+    // prover.assert_satisfied();
+
     println!("public input {:?}", public_input);
 
-    let prover = MockProver::run(
-        k,
-        &circuit,
-        vec![public_input.iter().map(|x| i32tofelt::<F>(*x)).collect()],
-        //            vec![vec![(4).into(), (1).into(), (35).into(), (22).into()]],
-    )
-    .unwrap();
-    prover.assert_satisfied();
+    let params = sample_srs();
+
+    //    let circuit = StandardPlonk::rand(OsRng);
+    let pk = sample_pk(&params, &circuit);
+    //  let deployment_code = evm_verifier_codegen(&params, pk.get_vk(), circuit.instances());
+    let instances = vec![public_input.iter().map(|x| i32tofelt::<F>(*x)).collect()];
+    let deployment_code = evm_verifier_codegen(&params, pk.get_vk(), instances.clone());
+
+    println!("Deployment code is {:?} bytes", deployment_code.len());
+
+    let proof = sample_proof(&params, &pk, circuit.clone(), instances.clone());
+    println!("Verifying");
+    evm_verify(deployment_code, instances, proof);
 }

@@ -1,6 +1,8 @@
 #![feature(generic_const_exprs)]
 mod mlp;
+mod smaller;
 
 fn main() {
-    mlp::mlprun()
+    //    mlp::mlprun()
+    smaller::run()
 }
